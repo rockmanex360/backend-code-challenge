@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="BackendCodeChallengeApi.Tests/BackendCodeChallengeApi.Tests.csproj" />
+  <Project Path="BackendCodeChallengeApi/BackendCodeChallengeApi.csproj" />
+</Solution>
