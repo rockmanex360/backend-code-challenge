@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using BackendCodeChallengeApi.Data.Repositories;
 using BackendCodeChallengeApi.Infrastructure;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Data.SqlClient;
@@ -23,6 +24,8 @@ builder.Services.AddAuthorizationBuilder()
 builder.Services.AddSingleton<IDbConnectionFactory>(sp => new SqlConnectionFactory(
     sp.GetRequiredService<IConfiguration>().GetConnectionString("Default")
     ?? throw new InvalidOperationException("ConnectionStrings:Default must be configured.")));
+
+builder.Services.AddSingleton<IUserRepository, UserRepository>();
 
 builder.Services.AddOpenApi(o => o.AddDocumentTransformer<ApiKeySecuritySchemeTransformer>());
 
