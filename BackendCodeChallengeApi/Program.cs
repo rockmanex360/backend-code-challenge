@@ -26,6 +26,7 @@ builder.Services.AddSingleton<IDbConnectionFactory>(sp => new SqlConnectionFacto
     ?? throw new InvalidOperationException("ConnectionStrings:Default must be configured.")));
 
 builder.Services.AddSingleton<IUserRepository, UserRepository>();
+builder.Services.AddSingleton<IShipRepository, ShipRepository>();
 
 builder.Services.AddOpenApi(o => o.AddDocumentTransformer<ApiKeySecuritySchemeTransformer>());
 
