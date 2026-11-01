@@ -17,4 +17,4 @@ jobs:
       - run: dotnet build --no-restore -c Release
       - run: dotnet test --no-build -c Release --filter "Category!=Integration"
       - run: dotnet test --no-build -c Release --filter "Category=Integration"
-      - run: docker compose build api
+      - run: docker build .
