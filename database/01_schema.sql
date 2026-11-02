@@ -32,7 +32,7 @@ BEGIN
         Description    NVARCHAR(50) NOT NULL,
         CONSTRAINT UQ_FiscalYear_StartMonth UNIQUE (StartMonth),
         CONSTRAINT CK_FiscalYear_StartMonth CHECK (StartMonth BETWEEN 1 AND 12),
-        CONSTRAINT CK_FiscalYear_EndMonth   CHECK (EndMonth = (StartMonth + 10) % 12 + 1),   -- 12-month year (A20)
+        CONSTRAINT CK_FiscalYear_EndMonth   CHECK (EndMonth = (StartMonth + 10) % 12 + 1), 
         CONSTRAINT CK_FiscalYear_Code       CHECK (FiscalYearCode = RIGHT('0' + CAST(StartMonth AS VARCHAR(2)), 2)
                                                                   + RIGHT('0' + CAST(EndMonth   AS VARCHAR(2)), 2))
     );
