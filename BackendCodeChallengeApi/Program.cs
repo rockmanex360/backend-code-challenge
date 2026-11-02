@@ -28,6 +28,7 @@ builder.Services.AddSingleton<IDbConnectionFactory>(sp => new SqlConnectionFacto
 builder.Services.AddSingleton<IUserRepository, UserRepository>();
 builder.Services.AddSingleton<IShipRepository, ShipRepository>();
 builder.Services.AddSingleton<ICrewRepository, CrewRepository>();
+builder.Services.AddSingleton<IFinancialReportRepository, FinancialReportRepository>();
 
 builder.Services.AddOpenApi(o => o.AddDocumentTransformer<ApiKeySecuritySchemeTransformer>());
 
