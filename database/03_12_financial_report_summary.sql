@@ -56,6 +56,7 @@ BEGIN
     FROM Months m
     LEFT JOIN Act a ON a.AccountPeriod = m.AccountPeriod
     LEFT JOIN Bud b ON b.AccountPeriod = m.AccountPeriod
+    WHERE COALESCE(a.Actual, 0) <> 0 OR COALESCE(b.Budget, 0) <> 0
     ORDER BY m.AccountPeriod;
 
     SELECT CAST(a.v AS DECIMAL(18,2)) AS ActualYtd,

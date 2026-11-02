@@ -99,6 +99,28 @@ public sealed class FinancialReportsControllerTests : IClassFixture<FinancialRep
     }
 
     [Fact]
+    public async Task Detail_variance_is_null_when_the_period_has_no_actual_and_no_budget()
+    {
+        FinancialReportLine[] lines =
+        [
+            new("7140000", "NO PERIOD DATA", 3, false, "7100000", null, null, null, 600m, null, 600m)
+        ];
+        _repo.Setup(r => r.GetDetailAsync("T01", July, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FinancialReportDetail(Header, lines));
+
+        var response = await _client.GetAsync("/api/ships/T01/financial-reports/detail?period=2025-07");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var line = (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("lines")[0];
+        Assert.Equal(JsonValueKind.Null, line.GetProperty("actual").ValueKind);
+        Assert.Equal(JsonValueKind.Null, line.GetProperty("budget").ValueKind);
+        Assert.Equal(JsonValueKind.Null, line.GetProperty("variance").ValueKind);
+        Assert.Equal(600m, line.GetProperty("actualYtd").GetDecimal());
+        Assert.Equal(JsonValueKind.Null, line.GetProperty("budgetYtd").ValueKind);
+        Assert.Equal(600m, line.GetProperty("varianceYtd").GetDecimal());
+    }
+
+    [Fact]
     public async Task Summary_returns_months_with_null_month_and_ytd()
     {
         FinancialSummaryMonth[] months =

@@ -122,10 +122,16 @@ SELECT a.AccountNumber,
        a.ParentAccountNumber,
        CAST(r.ActualPeriod AS DECIMAL(18,2)) AS ActualPeriod,
        CAST(r.BudgetPeriod AS DECIMAL(18,2)) AS BudgetPeriod,
-       CAST(COALESCE(r.ActualPeriod, 0) - COALESCE(r.BudgetPeriod, 0) AS DECIMAL(18,2)) AS VarianceActual,
-       CAST(r.ActualYtd AS DECIMAL(18,2))    AS ActualYtd,
-       CAST(r.BudgetYtd AS DECIMAL(18,2))    AS BudgetYtd,
-       CAST(COALESCE(r.ActualYtd, 0) - COALESCE(r.BudgetYtd, 0) AS DECIMAL(18,2))       AS VarianceYtd
+       CAST(CASE WHEN r.ActualPeriod IS NULL AND r.BudgetPeriod IS NULL 
+            THEN NULL ELSE COALESCE(r.ActualPeriod, 0) - COALESCE(r.BudgetPeriod, 0) 
+       END AS DECIMAL(18,2)) AS VarianceActual,
+
+       CAST(CASE WHEN r.ActualYtd IS NULL AND r.BudgetYtd IS NULL 
+            THEN NULL ELSE COALESCE(r.ActualYtd, 0) - COALESCE(r.BudgetYtd, 0) 
+       END AS DECIMAL(18,2)) AS VarianceYtd,
+
+       CAST(r.BudgetYtd AS DECIMAL(18,2)) AS BudgetYtd,
+       CAST(r.ActualYtd AS DECIMAL(18,2)) AS ActualYtd
 FROM Rolled r
 JOIN dbo.Account a ON a.AccountNumber = r.AccountNumber
 JOIN Depth d       ON d.AccountNumber = r.AccountNumber;

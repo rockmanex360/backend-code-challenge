@@ -13,8 +13,8 @@ public sealed class FinancialReportTests(SqlServerFixture db)
 
     private static DateTime P(string yyyyMm) => DateTime.Parse(yyyyMm + "-01");
 
-    private static void AssertLine(FinancialReportLine l, decimal? actual, decimal? budget, decimal variance,
-        decimal? actualYtd, decimal? budgetYtd, decimal varianceYtd)
+    private static void AssertLine(FinancialReportLine l, decimal? actual, decimal? budget, decimal? variance,
+        decimal? actualYtd, decimal? budgetYtd, decimal? varianceYtd)
     {
         Assert.Equal((actual, budget, variance, actualYtd, budgetYtd, varianceYtd),
             (l.ActualPeriod, l.BudgetPeriod, l.VarianceActual, l.ActualYtd, l.BudgetYtd, l.VarianceYtd));
@@ -58,16 +58,16 @@ public sealed class FinancialReportTests(SqlServerFixture db)
     }
 
     [Fact]
-    public async Task T_F2_summary_has_all_months_and_excludes_noise()
+    public async Task T_F2_summary_skips_months_without_values()
     {
         await Golden();
         var s = await _repo.GetSummaryAsync("T01", P("2025-07"), default);
 
         Assert.Equal(P("2025-01"), s.Header.YtdFrom);
-        Assert.Equal(7, s.Months.Count);
-        Assert.Equal(Enumerable.Range(1, 7).Select(m => P($"2025-{m:00}")), s.Months.Select(m => m.AccountPeriod));
+        Assert.Equal(4, s.Months.Count);
+        Assert.Equal(new[] { "2025-02", "2025-03", "2025-06", "2025-07" }.Select(P), s.Months.Select(m => m.AccountPeriod));
         Assert.Equal<(decimal?, decimal?, decimal)>(
-            [(null, null, 0), (2000, 2100, -100), (1200, 1100, 100), (null, null, 0), (null, null, 0), (3100, 3100, 0), (3300, 3300, 0)],
+            [(2000, 2100, -100), (1200, 1100, 100), (3100, 3100, 0), (3300, 3300, 0)],
             s.Months.Select(m => (m.Actual, m.Budget, m.Variance)));
         Assert.Equal(new FinancialSummaryYtd(9600, 9600, 0), s.Ytd);
     }
@@ -146,11 +146,11 @@ public sealed class FinancialReportTests(SqlServerFixture db)
     }
 
     [Fact]
-    public async Task T_F10_summary_for_april_fiscal_year_has_eleven_months()
+    public async Task T_F10_summary_for_april_fiscal_year_has_three_months()
     {
         await Boundary();
         var s = await _repo.GetSummaryAsync("T02", P("2025-02"), default);
-        Assert.Equal(11, s.Months.Count);
+        Assert.Equal(3, s.Months.Count);
         Assert.Equal(P("2024-04"), s.Months[0].AccountPeriod);
         Assert.Equal(P("2025-02"), s.Months[^1].AccountPeriod);
         Assert.Equal(100m, s.Months[0].Actual);
