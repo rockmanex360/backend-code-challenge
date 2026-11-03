@@ -169,4 +169,14 @@ public sealed class FinancialReportTests(SqlServerFixture db)
         Assert.Contains("inactive", detail.Message);
         Assert.Contains("inactive", summary.Message);
     }
+
+    [Fact]
+    public async Task T_F12_summary_without_any_values_has_null_ytd()
+    {
+        await Boundary();
+        var s = await _repo.GetSummaryAsync("T02", P("2027-04"), default);
+        Assert.Empty(s.Months);
+        Assert.Equal(new FinancialSummaryYtd(null, null, null), s.Ytd);
+    }
+
 }

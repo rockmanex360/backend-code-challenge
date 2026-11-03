@@ -157,6 +157,7 @@ public sealed class FinancialReportsControllerTests : IClassFixture<FinancialRep
     [InlineData("detail", "?period=2025-00")]
     [InlineData("detail", "?period=07-2025")]
     [InlineData("detail", "?period=")]
+    [InlineData("detail", "?period=0000-01")]
     [InlineData("detail", "")]
     [InlineData("summary", "?period=2025-7")]
     [InlineData("summary", "?period=2025-13")]

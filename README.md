@@ -1,232 +1,155 @@
 # AE Backend Code Challenge
 
-## Objective
+Ship management API for the Anglo-Eastern backend challenge: users, ships, crew lists and financial reports on SQL Server. The API never talks to a table directly. Every read and write goes through a stored procedure, which is what the requirements ask for.
 
-This challenge assesses your ability to design and implement a backend solution that includes:
+The ERD is in [docs/erd.md](docs/erd.md).
 
-- Designing a SQL Server database schema and stored procedures using T-SQL  
-- Building REST APIs in C# that consume those stored procedures  
-- Implementing features around ship management, crew, and financial reporting  
+## Stack
 
-**Tech stack requirements:**  
-- Database: SQL Server
-- Backend: C#  
-- Testing: xUnit  
-- Database access via stored procedures only
+ASP.NET Core 10 with controllers, Dapper for data access, SQL Server 2022, xUnit with Moq for unit tests and Testcontainers for the integration ones, Swagger UI, Docker Compose and a GitHub Actions build.
 
----
+## Running it
 
-## Domain Model & Business Rules
+```bash
+cp .env.example .env      # set your own SA password and API key
+docker compose up --build
+```
 
-The challenge models a ship management system with these main entities:
+API on http://localhost:8080, Swagger on http://localhost:8080/swagger.
 
-### Ship
+The SQL Server image is pinned to `linux/amd64`, so on Apple Silicon it runs under emulation and the first start can take a minute or two.
 
-Each ship has a unique code, a name, and has assigned fiscal year code determining its accounting period — for example, `"0112"` means the fiscal year runs from January to December, while `"0403"` means the fiscal year starts in April and ends in March the following year. The status of a ship indicates whether it is currently active or inactive in service. Only active ships should be considered in operational queries and reports.
+Swagger UI is enabled in every environment on purpose, because compose runs the API as Production and reviewers use it through Docker. A real deployment would switch it off or put it behind auth.
 
-### Crew
+The compose file has three services. `db` is SQL Server. `db-init` waits for the healthcheck, creates the `ShipManagement` database and runs every script in `database/` in filename order, so `01_schema`, `02_functions`, `03_01` through `03_12`, `04_seed_reference`, `05_seed_sample`. `api` starts once that finishes. All scripts are re-runnable: tables are created behind an `IF OBJECT_ID` check, procedures use `CREATE OR ALTER`, and the seeds skip rows that already exist.
 
-Each ship maintains a roster of crew members. A crew member is identified by a unique ID and has personal details such as name, nationality, birth date, and rank. Ranks follow a standard maritime classification (e.g., Master, Chief Engineer, Chief Officer), and typically only one crew member holds each rank on board during a contract. [^1]
+Without Docker, point `ConnectionStrings:Default` and `Auth:ApiKey` at your own instance and run:
 
-Crew service history is recorded per ship and includes contract periods represented by key dates: Sign On Date (when the crew member joins the ship), Sign Off Date (when they leave), and End of Contract Date (the scheduled end of their contract). These dates determine the crew member’s current status relative to the ship:
+```bash
+dotnet run --project BackendCodeChallengeApi
+```
 
-- A crew member with a Sign On Date in the past, no Sign Off Date, and an End of Contract Date not yet passed is considered **Onboard**.
-- If the Sign On Date is in the future, the crew member is **Planned** to join.
-- If a crew member has no Sign Off Date, but the current date is more than 30 days past their End of Contract Date, their status is **Relief Due**.
-- If the Sign Off Date is set, the crew member’s service is considered complete (**Signed Off**).
+The dev profile listens on http://localhost:5023.
 
-### User and Ship Assignment
+## Auth
 
-Users of the system represent application users who can be assigned to one or more ships. Each user has a name and role within the system. Users can view the ships they are assigned to. The relationship between users and ships is many-to-many, allowing for flexible assignment scenarios.
+Every endpoint except `/health` and the OpenAPI document needs an `X-Api-Key` header. The expected key comes from `Auth:ApiKey` (`AUTH_API_KEY` in compose). Swagger has the Authorize button, so you can paste the key there and use the endpoints from the browser.
 
-### Financial Data and Accounting
+## Endpoints
 
-Each ship has associated financial data aligned with its fiscal year settings. The financial data includes budgeted amounts and actual transaction values, organized by accounting periods (monthly) and account numbers from a hierarchical Chart of Accounts (COA). Accounts can be parent (summary) or child (detail) types, forming a tree-like structure. [^2]
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/api/users` | name and role, returns 201 with a Location header |
+| GET | `/api/users` | `page`, `pageSize` |
+| GET | `/api/users/{userId}` | 404 when the user does not exist |
+| POST | `/api/ships` | code, name, fiscal year code, optional isActive |
+| GET | `/api/ships` | `status=active\|inactive\|all`, plus paging |
+| GET | `/api/ships/{code}` | code is case insensitive |
+| PUT | `/api/users/{userId}/ships/{code}` | assign, 204, idempotent |
+| DELETE | `/api/users/{userId}/ships/{code}` | unassign, 204, idempotent |
+| GET | `/api/users/{userId}/ships` | `status` filter |
+| GET | `/api/ships/{code}/crew` | `page`, `pageSize`, `sortBy`, `sortDir`, `search` |
+| GET | `/api/ships/{code}/financial-reports/detail?period=yyyy-MM` | one row per account, parents rolled up |
+| GET | `/api/ships/{code}/financial-reports/summary?period=yyyy-MM` | monthly totals plus a YTD row |
+| GET | `/health` | anonymous, checks the database connection |
 
-Budgets and actuals are recorded for child accounts, and parent account values should be computed by aggregating their child accounts. Budget and actual data may include zero values, always non-negative values, and are stored for specific ship codes, account numbers, and accounting periods. Year-to-date (YTD) calculations must respect each ship’s fiscal year settings, summing values from the start of the fiscal year to the selected period.
+## Errors
 
----
+Every error is a `ProblemDetails` body (`application/problem+json`). Procedures raise their own error numbers, and `SqlErrorTranslator` maps them once, at the repository boundary.
 
-## Sample Data
+| Status | When | Raised by |
+| --- | --- | --- |
+| 400 | Invalid body or query (missing field, bad period, unknown `sortBy`, page out of range). The response has an `errors` object per field. | Data annotations; procedures as `50010` |
+| 401 | `X-Api-Key` missing or wrong | API key handler |
+| 404 | Ship not found | `50001` |
+| 404 | User not found | `50002` |
+| 404 | Ship is inactive (crew list and reports only) | `50004` |
+| 409 | Ship code already exists | `50003`, unique index `2627` / `2601` |
+| 500 | Anything else. The detail is a generic message; the real exception is only logged. | `GlobalExceptionHandler` |
 
-### ships
+## Database
 
-| Code   | Name             | FiscalYear | Status  |
-|--------|------------------|------------|---------|
-| SHIP01 | Flying Dutchman   | 0112       | Active  |
-| SHIP02 | Thousand Sunny   | 0403       | Active  |
+Twelve tables: `FiscalYear`, `UserRole` and `Nationality` as reference data, `Ship`, `AppUser`, `UserShip`, `CrewMember`, `CrewRank`, `CrewService` for the domain, and `Account`, `Budget`, `AccountTransaction` for the financial side. The seed gives six ships across two fiscal year patterns, 132 crew with contracts in every state, 13 ranks, 33 accounts in three levels, and budgets for 2024–2025 and actuals through September 2025 for the four active ships.
 
-### Crew Members
+Three scalar functions and one inline table valued function do the shared work: `fn_CrewStatus`, `fn_AgeAt`, `fn_FiscalYearStart` and `fn_FinancialReport`. The last one is the report itself: it builds a closure over the account tree, reads the leaves, and rolls them up per parent, with the YTD window starting at the ship's fiscal year start.
 
-| CrewMemberId | FirstName | LastName | BirthDate  | Nationality |
-|--------------|-----------|----------|------------|-------------|
-| CREW001      | Soka      | Philip   | 1980-07-30 | Greek       |
-| CREW002      | Masteros  | Philip   | 1980-07-30 | Greek       |
+## Architecture
 
-### Crew Service History
+```
+HTTP -> controller -> repository interface -> Dapper -> dbo.usp_*
+                          |
+                          +-> SqlException -> SqlErrorTranslator -> DomainException -> ProblemDetails
+```
 
-| CrewMemberId | Rank           | ShipCode | SignOnDate | SignOffDate | EndOfContractDate |
-|--------------|----------------|----------|------------|-------------|-------------------|
-| CREW001      | Master         | SHIP01   | 2025-04-05 | NULL        | 2025-07-05        |
-| CREW002      | Chief Engineer | SHIP01   | 2025-04-04 | NULL        | 2025-07-04        |
+Contracts are the wire format: request records with data annotations, query objects for paging, sorting and filtering, and response records with a `From(row)` mapper. Data models are the rows the procedures return. They are separate so the JSON shape can change without touching SQL, and the other way round.
 
-### Chart of Accounts (COA)
+There is no service layer. The rules that matter (crew status, parent roll up, sorting, inactive ship handling) sit in the procedures, so a service layer would only forward calls and add a file per endpoint.
 
-- **7000000** OPERATING EXPENSES (Parent)  
-  - **7100000** AWARD AND GRANT TO INDIVIDUALS (Child of 7000000)  
+Repositories are singletons. They hold no state: every method opens a connection from `IDbConnectionFactory` and disposes it when it returns.
 
-### Budget Data
+SQL error numbers are translated once, at the repository boundary (see [Errors](#errors)). Controllers never see `SqlException`, and the exception handler turns domain exceptions into `ProblemDetails`.
 
-| ShipCode | AccountNumber | AccountPeriod | BudgetValue |
-|----------|---------------|---------------|-------------|
-| SHIP01   | 7135000       | 2025-01       | 0           |
-| SHIP01   | 7135000       | 2025-01       | 1000        |
-| SHIP01   | 7135000       | 2025-02       | 1200        |
-| ...      | ...           | ...           | ...         |
-| SHIP01   | 7135000       | 2025-12       | 900         |
+No entities with behaviour, no CQRS. For twelve tables and thirteen endpoints that is ceremony. If crew and finance writes arrive later, a service layer between the controller and the repository is the first thing to add.
 
-### Account Transactions
+## Design patterns
 
-| ShipCode | AccountNumber | AccountPeriod | ActualValue |
-|----------|---------------|---------------|-------------|
-| SHIP01   | 7135000       | 2025-01       | 300         |
-| SHIP01   | 7135000       | 2025-01       | 0           |
-| SHIP01   | 7135000       | 2025-01       | 700         |
+- Repository: one `I*Repository` interface per aggregate (`IUserRepository`, `IShipRepository`, `ICrewRepository`, `IFinancialReportRepository`), so controllers are tested with Moq and the SQL stays behind one boundary.
+- Factory: `IDbConnectionFactory` / `SqlConnectionFactory` hands out an opened `SqlConnection`.
+- Translator (Adapter): `SqlErrorTranslator` turns SQL error numbers into `DomainException` types, so nothing above the repository knows about `SqlException`.
+- Chain of Responsibility: the ASP.NET Core middleware pipeline; `GlobalExceptionHandler` sits in it and turns domain exceptions into `ProblemDetails`.
+- Strategy: authentication is an `AuthenticationHandler` (`ApiKeyAuthenticationHandler`) registered as a scheme; switching to JWT replaces the scheme, not the controllers.
 
----
+## Decisions
 
-## Challenge Requirements
+API key instead of JWT. A JWT needs a login endpoint, stored credentials and key management, and the requirements do not ask for a login flow. One key from configuration is enough here, and swapping it out later means changing one handler.
 
-### 1. Database Challenge
+Dapper instead of EF Core. EF Core earns its keep by translating LINQ into SQL and tracking changes. The requirements say every read and write must go through a stored procedure, so neither of those is available: with EF you would call the procedure through `FromSqlRaw`, which is its thinnest path, and still pay for model building, the `DbContext` lifetime and a mapping layer that does nothing. Dapper runs the procedure and maps the result, and the SQL stays where you can read it. What we give up is compile time checking of the SQL, migrations and change tracking, none of which apply when the procedures own the logic and the scripts own the schema.
 
-1. **Design the Database Schema**
-   - Create an Entity Relationship Diagram (ERD) based on the provided business context.
-   - Write the SQL queries in T-SQL (i.e. SQL Server-compatible). Assume that the target database runs on SQL Server Express or Azure SQL Database. Avoid MySQL-specific syntax.
-   - Identify and define necessary entities, relationships, and data types.
-   - Provide DDL (CREATE TABLE) scripts for all necessary entities.
-   - Include primary keys, foreign keys, and appropriate constraints (e.g., budget and actual values must not be negative).
+Crew status is not a column. It is derived from sign on date, sign off date and end of contract date, so it is computed at query time. Storing it would need a nightly job, and a nightly job goes stale the moment a contract is edited.
 
-2. **DDL Scripts**  
-   - Write SQL scripts to create the necessary tables and relationships.
-   - Avoid hardcoding assumptions — focus on building a flexible and normalized design.
+Fiscal year is a lookup table with all twelve patterns. The code is the start month followed by the end month, and a check constraint keeps the two in sync with the code. An unknown code is rejected by the API before it can produce a wrong YTD.
 
-3. **Insert Sample Data**  
-   - Include meaningful sample data covering:
-     - At least 5 ships with varying status (active/inactive) and fiscal years (e.g., Jan–Dec, Apr–Mar).
-     - Crew records with realistic service history (e.g., onboard, relief due, sign-off) with **at least 20 crew members per ship**, including a variety of ranks and overlapping service periods.
-     - Rank types and references for crew with **at least 5 distinct crew rank types**.
-     - Chart of Accounts with at least 5 parent accounts, each having a minimum of 5 child accounts arranged in a hierarchy of at least 2 levels.
-     - Budget data for at least 3 ships (aligned with the crew data), spanning fiscal years 0112 and 0403, covering the full periods of 2024 and 2025, with values for a minimum of 5 accounts.
-     - Account transaction data for at least 3 ships (corresponding to those in the budget and crew data), covering fiscal years 0112 and 0403, including at least 6 periods in 2025 and the full period of 2024.
+Parent accounts hold no amounts. Only leaves have budget and transaction rows, and the report adds descendants up. That kept the seed honest and made the roll up testable.
 
-4. **Stored Procedures / Views**  
-   - Crew List: Create a stored procedure that returns crew members currently onboard or relief due for a selected ship as of today's date, supporting:
-     - Pagination (page size and page number)
-     - Sorting by any column (Rank Name, Crew ID, First/Last Name, Age, Nationality, SignOnDate, Status)
-     - Searching (filter by any column except Status, including partial date matches like `05 Apr`)
-     - Exclude any crew members who have signed off (i.e., crew with a non-null SignOffDate).
-   
-   - Financial Reports: Create stored procedures to return detailed and summary financial expense reports for a specific ship and period, including:
-     - COA Description and Account Number
-     - Actual and Budget values for the selected period
-     - Variances (Actual - Budget)
-     - Year-To-Date (YTD) Actuals, Budgets, and Variances calculated based on the ship’s fiscal year
-    
-#### Financial Data Notes (Summary)
+Variance is null when both sides are null, and 0 when actual equals budget. A month with no postings and no budget does not appear in the summary at all. Reporting 0 there would claim the ship finished exactly on budget, which is a different statement from "we have no figures for this month".
 
-- Budgets and actual transaction amounts are recorded at the child account level only.
-- Parent account values must be calculated by aggregating their child accounts.
-- Fiscal year codes (e.g., "0112" for Jan-Dec, "0403" for Apr-Mar) define the YTD calculation period.
-- Stored procedures must calculate monthly and YTD values for budget and actuals, as well as variances.
-- `0` and `NULL` are not the same. `0` indicates a value of zero (e.g. zero cost). `NULL` means the value is unknown, missing, or not applicable.
-- Only include records where budget or actual values are non-zero.
-    
-#### Example Output (Crew List)
+Paging defaults are page 1 and size 20, capped at 100. The crew list validates `sortBy` against a fixed set of columns, and sorting is done in the procedure with an `OFFSET FETCH` over a computed sort key.
 
-| Rank Name      | Crew Member ID | First Name | Last Name  | Age | Nationality | SignOnDate | Status   |
-|----------------|----------------|------------|------------|-----|-------------|------------|----------|
-| Master         | CREW001        | Soka       | Philip     | 45  | Greek       | 05 Apr 2025| Onboard  |
-| Chief Engineer | CREW002        | Masteros   | Philip     | 45  | Greek       | 05 Apr 2025| Onboard  |
-| Chief Officer  | CREW003        | John       | Masterbear | 50  | Greek       | 08 Apr 2025| Onboard  |
-| Cadet          | CREW004        | Bob        | Marley     | 27  | Mexican     | 05 Apr 2025| Onboard  |
-| Oiler          | CREW005        | John       | Chena      | 30  | Mexican     | 08 Apr 2025| Relief Due |
+## Caching
 
-#### Example Output (Financial Report Detail)
+Not implemented. If it were, the first candidates are the two report endpoints, keyed by ship code and period. The closure over the account tree and the YTD window are the expensive part, and this API cannot change financial rows at all (no budget import, no transaction endpoint), so a short TTL is enough and there is nothing to invalidate beyond the TTL itself.
 
-| COA Description            | Account Number | Actual (Jul 2025) | Budget (Jul 2025) | Variance Actual | Actual YTD (Jan-Jul 2025) | Budget YTD (Jan-Jul 2025) | Variance YTD |
-|----------------------------|----------------|-------------------|-------------------|-----------------|---------------------------|---------------------------|--------------|
-| OPERATING EXPENSE           | 7000000        | 3300              |                   | 3300            | 9600                      | 9900                      | 0            |
-| AWARD AND GRANT TO INDIVIDUALS | 7100000        | 3300              | 3300              | 0               | 9600                      | 9900                      | 0            |
-| AWARDS                     | 7120000        |                   | 1000              | 1100            | -100                      | 3200                      | 3300         | -100         |
-| SCHOLARSHIPS               | 7135000        | 2300              | 2200              | 100             | 6400                      | 6300                      | 100          |
+The second candidate is reference data: fiscal years, roles and nationalities. It is small, it is read on almost every request, and it changes about once a year.
 
-Access all data only via stored procedures. Use realistic data and ensure correctness of fiscal year–based YTD calculations.
+Both are left out because the callers and their rate are unknown. A cache in front of a report that gets called twice a day buys nothing and adds a component that can serve stale numbers. Once there is a traffic figure, or a write path for budget and actuals that needs invalidating properly, that is when it starts paying for itself.
 
----
+## Assumptions
 
-### 2. API Challenge
+- "Today" is the UTC date. The crew list procedure takes an `@AsOfDate` parameter so tests can pin it.
+- Duplicate budget or transaction rows for the same ship, account and month are summed rather than rejected.
+- One holder per rank is not enforced. Handovers overlap in real life.
+- An inactive ship returns 404 on crew lists and reports, with a message that says it is inactive. Ship lists still show it with its status.
+- The crew list only returns Onboard and Relief Due contracts. Anything with a sign off date is excluded.
+- `0` and `NULL` are different things everywhere in the reports: a stored zero is shown as `0`, a missing figure as `null`.
 
-#### Objectives:
+## Tests
 
-- Build REST APIs in C# that consume your stored procedures.
-- Implement endpoints for users, ships, crews, and financial reporting.
-- Implement the following user stories (including but not limited to):
-  - Add and list users.
-  - Add and list ships.
-  - Assign ships to users and retrieve ships by user.
-  - Retrieve crew lists for ships (per database SP).
-  - Retrieve financial reports per ship and accounting period (per database SP).
+```bash
+dotnet test --filter "Category!=Integration"   # 150 unit tests, no Docker needed
+dotnet test                                     # all 211, Docker must be running
+```
 
-#### Requirements
+211 tests. 150 unit tests cover the controllers, the API key handler, validation attributes and the SQL error translator, with repositories replaced by Moq. 61 integration tests start a SQL Server 2022 container, run every script in `database/`, and check the procedures and endpoints against their own test rows (fresh ship codes per test class), so they exercise the real SQL rather than a fake.
 
-- APIs should interact only with the database via stored procedures.
-- APIs should handle errors and edge cases gracefully
-- Follow RESTful principles.
-- Follow best practices in code structure, naming, and testability.
-- Use appropriate HTTP methods and status codes.
-- Write unit tests using xUnit.
+CI runs both groups separately, then builds the Docker image.
 
----
+## Known gaps
 
-## Evaluation Criteria
+- No concurrency control. There are no update endpoints today; if one is added it needs a rowversion or ETag so two writers cannot silently overwrite each other.
+- Financial reports are read only. There is no budget import and no sign on or sign off endpoint.
+- No caching (see above) or rate limiting.
+- Search in the crew list is a `LIKE` scan over the filtered set. Fine at this size, not at a hundred thousand contracts.
 
-Your submission will be evaluated based on the following aspects:
+## Notes
 
-- **Database design:** Appropriate data types, constraints, lengths, relationships, and normalization.
-- **Stored procedure logic:** Accurate calculations covering all required features and functions. Emsire stored procedures are safe from SQL injection.
-- **Code quality and readability:** Clean, maintainable, and well-structured code following consistent naming and formatting conventions.
-- **Testing:** Unit tests or scripts demonstrating correctness of the logic and covering both typical and edge cases.
-- **Error and exception handling:** Robust handling of edge cases, validation errors, and unexpected failures, with meaningful error codes/messages.
-- **API validation and input handling:** Validate all API inputs (e.g., required fields, date formats) properly with clear error messages and appropriate HTTP status codes.
-- **Best practices and principles:** Adherence to clean code, modularity, and design patterns.
-- **Basic system design:** Overall architecture and scalability considerations.
-- **Documentation:** Clear README explaining your design decisions and how to run your solution.
-
-### Nice to have
-
-- Simple authentication procedure for the API (e.g. JWT auth or API key-based)
-- Use of scalar or table-valued functions to promote logic reuse.
-- Basic logging for key actions.
-- Swagger UI for API documentation.
-- Docker setup for easy environment setup and deployment.
-- Basic CI scripting to automate tests or builds.
-
----
-
-## Deliverable
-
-Please create a **GitHub repository** containing your full solution, including:
-
-- Database scripts (DDL, stored procedures, sample data, and ERD)
-- API source code and tests
-- Documentation (README)
-- Any additional files (e.g., Dockerfile, CI scripts, Swagger specs)
-
-Share the GitHub repo link with us via e-mail.
-
----
-
-If you have any questions or need clarifications, feel free to contact us by e-mail.
-
-[^1]: Reference for crew ranks: [https://nedcon.ro/crew-structure-on-board-merchant-ships-deck-department/](https://nedcon.ro/crew-structure-on-board-merchant-ships-deck-department/ )
-[^2]: Reference for chart of accounts: [https://www.gocivilairpatrol.com/media/cms/R173_001_CoA_3918FC7AF372F.pdf](https://www.gocivilairpatrol.com/media/cms/R173_001_CoA_3918FC7AF372F.pdf)
+`System.Security.Cryptography.Pkcs` is pinned to 10.0.14 because `Microsoft.Data.SqlClient` 7.1.1 resolves 9.0.18, which has a high and a moderate advisory (GHSA-846f-f764-76mx, GHSA-2fmv-rv2c-59x7). With the pin, `dotnet list package --vulnerable --include-transitive` reports nothing for either project.

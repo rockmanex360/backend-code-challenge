@@ -61,7 +61,9 @@ BEGIN
 
     SELECT CAST(a.v AS DECIMAL(18,2)) AS ActualYtd,
            CAST(b.v AS DECIMAL(18,2)) AS BudgetYtd,
-           CAST(COALESCE(a.v, 0) - COALESCE(b.v, 0) AS DECIMAL(18,2)) AS VarianceYtd
+           CAST(CASE WHEN a.v IS NULL AND b.v IS NULL
+                THEN NULL ELSE COALESCE(a.v, 0) - COALESCE(b.v, 0)
+           END AS DECIMAL(18,2)) AS VarianceYtd
     FROM (SELECT SUM(ActualValue) AS v FROM dbo.AccountTransaction
           WHERE ShipCode = @ShipCode AND AccountPeriod BETWEEN @YtdFrom AND @Period) a
     CROSS JOIN
