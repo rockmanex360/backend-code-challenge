@@ -2,7 +2,7 @@
 
 Ship management API for the Anglo-Eastern backend challenge: users, ships, crew lists and financial reports on SQL Server. The API never talks to a table directly. Every read and write goes through a stored procedure, which is what the requirements ask for.
 
-The ERD is in [docs/erd.md](docs/erd.md).
+The ERD is in [database/ERD.md](database/ERD.md).
 
 ## Stack
 
@@ -21,7 +21,9 @@ The SQL Server image is pinned to `linux/amd64`, so on Apple Silicon it runs und
 
 Swagger UI is enabled in every environment on purpose, because compose runs the API as Production and reviewers use it through Docker. A real deployment would switch it off or put it behind auth.
 
-The compose file has three services. `db` is SQL Server. `db-init` waits for the healthcheck, creates the `ShipManagement` database and runs every script in `database/` in filename order, so `01_schema`, `02_functions`, `03_01` through `03_12`, `04_seed_reference`, `05_seed_sample`. `api` starts once that finishes. All scripts are re-runnable: tables are created behind an `IF OBJECT_ID` check, procedures use `CREATE OR ALTER`, and the seeds skip rows that already exist.
+The compose file has three services. `db` is SQL Server. `db-init` waits for the healthcheck, creates the `ShipManagement` database and runs every script in `database/` in filename order. `api` starts once that finishes. 
+
+All scripts are re-runnable, tables are created behind an `IF OBJECT_ID` check, procedures use `CREATE OR ALTER`, and the seeds skip rows that already exist.
 
 Without Docker, point `ConnectionStrings:Default` and `Auth:ApiKey` at your own instance and run:
 
@@ -83,14 +85,9 @@ HTTP -> controller -> repository interface -> Dapper -> dbo.usp_*
 
 Contracts are the wire format: request records with data annotations, query objects for paging, sorting and filtering, and response records with a `From(row)` mapper. Data models are the rows the procedures return. They are separate so the JSON shape can change without touching SQL, and the other way round.
 
-There is no service layer. The rules that matter (crew status, parent roll up, sorting, inactive ship handling) sit in the procedures, so a service layer would only forward calls and add a file per endpoint.
-
 Repositories are singletons. They hold no state: every method opens a connection from `IDbConnectionFactory` and disposes it when it returns.
 
 SQL error numbers are translated once, at the repository boundary (see [Errors](#errors)). Controllers never see `SqlException`, and the exception handler turns domain exceptions into `ProblemDetails`.
-
-No entities with behaviour, no CQRS. For twelve tables and thirteen endpoints that is ceremony. If crew and finance writes arrive later, a service layer between the controller and the repository is the first thing to add.
-
 ## Design patterns
 
 - Repository: one `I*Repository` interface per aggregate (`IUserRepository`, `IShipRepository`, `ICrewRepository`, `IFinancialReportRepository`), so controllers are tested with Moq and the SQL stays behind one boundary.
@@ -99,29 +96,40 @@ No entities with behaviour, no CQRS. For twelve tables and thirteen endpoints th
 - Chain of Responsibility: the ASP.NET Core middleware pipeline; `GlobalExceptionHandler` sits in it and turns domain exceptions into `ProblemDetails`.
 - Strategy: authentication is an `AuthenticationHandler` (`ApiKeyAuthenticationHandler`) registered as a scheme; switching to JWT replaces the scheme, not the controllers.
 
-## Decisions
+## Design decisions
 
-API key instead of JWT. A JWT needs a login endpoint, stored credentials and key management, and the requirements do not ask for a login flow. One key from configuration is enough here, and swapping it out later means changing one handler.
+A thin API over stored procedures. The requirements route every database call through a stored procedure, so the procedures do the real work (crew status, account roll up, fiscal year YTD, search, sorting, paging) as set-based queries next to the data. The API only validates input, calls the procedure and shapes the response.
 
-Dapper instead of EF Core. EF Core earns its keep by translating LINQ into SQL and tracking changes. The requirements say every read and write must go through a stored procedure, so neither of those is available: with EF you would call the procedure through `FromSqlRaw`, which is its thinnest path, and still pay for model building, the `DbContext` lifetime and a mapping layer that does nothing. Dapper runs the procedure and maps the result, and the SQL stays where you can read it. What we give up is compile time checking of the SQL, migrations and change tracking, none of which apply when the procedures own the logic and the scripts own the schema.
+Not Clean Architecture or DDD. Both put the business rules in the application's centre; here those rules live in SQL, so the centre would be empty and every use case would only forward to a repository. What still pays off is kept: controllers depend on interfaces, contracts are separate from SQL rows, and names come from the requirements. When a real workflow arrives (sign on, budget import), a service is added for that endpoint. The cost is that SQL logic needs a real database to test, hence the integration tests, and it ties the solution to SQL Server.
 
-Crew status is not a column. It is derived from sign on date, sign off date and end of contract date, so it is computed at query time. Storing it would need a nightly job, and a nightly job goes stale the moment a contract is edited.
+Smaller decisions:
 
-Fiscal year is a lookup table with all twelve patterns. The code is the start month followed by the end month, and a check constraint keeps the two in sync with the code. An unknown code is rejected by the API before it can produce a wrong YTD.
+- API key, not JWT: there is no login flow to support, and switching means replacing one auth handler.
+- Dapper, not EF Core: with stored procedures only, EF's LINQ translation and change tracking go unused; Dapper calls the procedure and maps the result.
+- Crew status is computed at query time from the contract dates, not stored, so it cannot go stale.
+- Fiscal year is a lookup of all twelve patterns with a check constraint, so a ship cannot get a code that breaks YTD.
+- Only leaf accounts hold amounts; parents are always rolled up from them.
+- `null` means no data and `0` means a recorded zero. Variance is null only when both sides are null, and the summary skips months with no figures.
+- Lists default to page 1 and size 20, capped at 100; `sortBy` is checked against a fixed set of columns.
 
-Parent accounts hold no amounts. Only leaves have budget and transaction rows, and the report adds descendants up. That kept the seed honest and made the roll up testable.
+## Scalability
 
-Variance is null when both sides are null, and 0 when actual equals budget. A month with no postings and no budget does not appear in the summary at all. Reporting 0 there would claim the ship finished exactly on budget, which is a different statement from "we have no figures for this month".
+The API is stateless (no sessions, singleton repositories, key from configuration), so it scales out behind a load balancer. Calls are async with the request's cancellation token passed to SQL, and connections come from the pool.
 
-Paging defaults are page 1 and size 20, capped at 100. The crew list validates `sortBy` against a fixed set of columns, and sorting is done in the procedure with an `OFFSET FETCH` over a computed sort key.
+The database is where load lands, so the work is shaped there: every list is paged in the procedure and capped at 100, the indexes match the access paths (open contracts per ship; budgets and transactions by ship and period, covering), and a report reads one ship's YTD window, so its cost does not grow with history.
+
+Where it breaks first, and the next step:
+
+- Crew search uses a leading-wildcard `LIKE`: full-text search.
+- Deep `OFFSET` pages slow down: keyset paging.
+- Heavy report traffic: a readable secondary, then caching.
+- A very large transaction table: partition by period, or a monthly aggregate.
+- One shared API key: a key per client, with rate limiting.
 
 ## Caching
 
-Not implemented. If it were, the first candidates are the two report endpoints, keyed by ship code and period. The closure over the account tree and the YTD window are the expensive part, and this API cannot change financial rows at all (no budget import, no transaction endpoint), so a short TTL is enough and there is nothing to invalidate beyond the TTL itself.
 
-The second candidate is reference data: fiscal years, roles and nationalities. It is small, it is read on almost every request, and it changes about once a year.
-
-Both are left out because the callers and their rate are unknown. A cache in front of a report that gets called twice a day buys nothing and adds a component that can serve stale numbers. Once there is a traffic figure, or a write path for budget and actuals that needs invalidating properly, that is when it starts paying for itself.
+Not implemented, on purpose. The only candidates are the two report endpoints, keyed by ship code and period: they do the most work, and no endpoint changes budgets or actuals, so a short TTL would never serve wrong numbers for long. The reason it is left out is that the traffic is unknown. A cache in front of a report called a few times a day adds a moving part and buys nothing. Add it when there is a traffic figure, or when budgets and actuals get a write path that would need to invalidate it.
 
 ## Assumptions
 
@@ -148,7 +156,7 @@ CI runs both groups separately, then builds the Docker image.
 - No concurrency control. There are no update endpoints today; if one is added it needs a rowversion or ETag so two writers cannot silently overwrite each other.
 - Financial reports are read only. There is no budget import and no sign on or sign off endpoint.
 - No caching (see above) or rate limiting.
-- Search in the crew list is a `LIKE` scan over the filtered set. Fine at this size, not at a hundred thousand contracts.
+- Crew search and deep paging have known limits at large volume (see Scalability).
 
 ## Notes
 
